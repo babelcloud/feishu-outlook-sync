@@ -186,21 +186,24 @@ class SaveHandler:
         """Get Outlook calendar ID."""
         return self.config['outlook']['calendar_id']['id']
     
-    def set_outlook_token(self, access_token: str, expires_in: int) -> None:
+    def set_outlook_token(self, access_token: str, refresh_token: str, expires_in: int) -> None:
         """Set Outlook tokens with expiration."""
         expiration = int(time.time()) + expires_in
         self.config['outlook']['tokens'] = {
             'access_token': access_token,
+            'refresh_token': refresh_token,
             'expiration_time': expiration
         }
         self._save_config()
 
-    def get_outlook_token(self) -> Tuple[Optional[str], Optional[int]]:
-        """Get Outlook token and expiration if valid."""
+    def get_outlook_token(self) -> tuple[Optional[str], Optional[str], Optional[int]]:
+        """Get Outlook tokens and expiration if valid."""
         token_data = self.config['outlook']['tokens']
         if (not token_data['access_token'] or 
+            not token_data['refresh_token'] or
             not token_data['expiration_time']):
-            return None, None
+            return None, None, None
         
         return (token_data['access_token'], 
+                token_data['refresh_token'],
                 token_data['expiration_time'])

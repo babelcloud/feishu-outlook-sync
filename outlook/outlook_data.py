@@ -13,45 +13,68 @@ class OutlookHandler:
         self.TENANT_ID = tenant_id
         
         # Allow http for development
+        import os
         os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
         
         self.save_handler = SaveHandler()
         
-        # Initialize account
+        # Initialize account with offline_access scope to get refresh tokens
         self.account = Account((client_id, client_secret),
                              tenant_id=tenant_id,
-                             scopes=['calendar_all'])
+                             scopes=['offline_access', 'calendar_all'])
         
-        # Try to load existing token
+        # Try to load existing tokens
         self._load_saved_token()
 
     def _load_saved_token(self):
-        access_token, expiration = self.save_handler.get_outlook_token()
-        if access_token:
+        """Load and validate both access and refresh tokens."""
+        access_token, refresh_token, expiration = self.save_handler.get_outlook_token()
+        if access_token and refresh_token:
             self.account.connection.token_backend.token = {
                 'token_type': 'Bearer',
                 'access_token': access_token,
-                # 'refresh_token': refresh_token,
+                'refresh_token': refresh_token,
                 'expires_at': expiration
             }
 
+    def _save_tokens(self, token_dict):
+        """Save both access and refresh tokens."""
+        self.save_handler.set_outlook_token(
+            access_token=token_dict.get('access_token'),
+            refresh_token=token_dict.get('refresh_token'),
+            expires_in=3600  # Standard expiration for access token
+        )
+
     def authenticate(self):
-        # Simple authentication that uses O365's built-in browser auth.
+        """Authenticate with proper token refresh handling."""
         try:
-            # Check if current token is valid
+            # First check if current token is valid
             if self.account.is_authenticated:
                 return True
 
-            print("\nPlease sign in to your Outlook account in the browser window...")
+            # Check if we have a refresh token to use
+            token_dict = self.account.connection.token_backend.token
+            if token_dict and 'refresh_token' in token_dict:
+                try:
+                    # Attempt to refresh the token
+                    print("Attempting to refresh token...")
+                    result = self.account.connection.refresh_token()
+                    if result:
+                        # Save the new tokens
+                        self._save_tokens(self.account.connection.token_backend.token)
+                        print("Successfully refreshed token")
+                        return True
+                except Exception as e:
+                    print(f"Token refresh failed: {e}")
+                    # Continue to full authentication if refresh fails
+
+            # If we get here, we need a full authentication
+            print("\nFull authentication required. Please sign in to your Outlook account in the browser window...")
             result = self.account.authenticate()
             
             if result:
-                # Save new tokens
-                token = self.account.connection.token_backend.token
-                self.save_handler.set_outlook_token(
-                    access_token=token['access_token'],
-                    expires_in=3600  # Standard expiration
-                )
+                # Save both access and refresh tokens
+                self._save_tokens(self.account.connection.token_backend.token)
                 return True
             return False
             
