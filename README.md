@@ -87,6 +87,7 @@ outlook:
     tenant_id: your_tenant_id
   tokens:
     access_token: null
+    refresh_token: null
     expiration_time: null
   calendar_id:
     id: null
