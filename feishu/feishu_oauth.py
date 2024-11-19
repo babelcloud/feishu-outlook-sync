@@ -1,7 +1,9 @@
 import urllib.parse
-from typing import Optional
 import uvicorn
+import base64
+import os
 import lark_oapi as lark
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
@@ -11,7 +13,7 @@ class FeishuOAuth:
         self.APP_SECRET = app_secret
         self.REDIRECT_URI = "http://127.0.0.1:5000/callback"
         self.SCOPE = "calendar:calendar:readonly calendar:calendar:read calendar:calendar.event:read"
-        self.STATE = "RANDOMSTATE"
+        self.STATE = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
         
         # Initialize FastAPI and lark client
         self.app = FastAPI()

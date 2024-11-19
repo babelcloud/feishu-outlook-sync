@@ -1,10 +1,10 @@
 import urllib.parse
 import os
-from typing import Optional
+import base64
 import uvicorn
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
-import requests
 
 class OutlookOAuth:
     def __init__(self, client_id: str, client_secret: str, tenant_id: str):
@@ -13,7 +13,7 @@ class OutlookOAuth:
         self.TENANT_ID = tenant_id
         self.REDIRECT_URI = "http://localhost:5001/callback"
         self.SCOPE = "https://graph.microsoft.com/Calendars.ReadWrite offline_access"
-        self.STATE = "RANDOMSTATE"
+        self.STATE = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
         
         # Initialize FastAPI
         self.app = FastAPI()
