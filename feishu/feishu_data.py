@@ -1,37 +1,26 @@
 import json
 import time
 import requests
-import sys
-import os
 import lark_oapi as lark
-from .feishu_oauth import get_oauth_code
+from datetime import datetime, timezone
 from lark_oapi.api.authen.v1 import *
 from lark_oapi.api.auth.v3 import *
 from lark_oapi.api.calendar.v4 import *
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from save_handler import SaveHandler
 
 class DataHandler:
     def __init__(self, app_id, app_secret):
         self.APP_ID = app_id
         self.APP_SECRET = app_secret
-
-        # Initialize the SaveHandler
         self.save_handler = SaveHandler()
 
-        # Initialize the client
         self.client = lark.Client.builder() \
             .app_id(self.APP_ID) \
             .app_secret(self.APP_SECRET) \
             .enable_set_token(True) \
             .log_level(lark.LogLevel.DEBUG) \
             .build()
-        
-    def obtain_oauth_code(self):
-        return get_oauth_code(self.APP_ID, self.APP_SECRET)
-    
+
     def obtain_app_access_token(self):
-        # Taken partially from oapi-python-sdk/samples/api/auth/v3/internal_app_access_token_sample.py
         request: InternalAppAccessTokenRequest = InternalAppAccessTokenRequest.builder() \
             .request_body(InternalAppAccessTokenRequestBody.builder()
                         .app_id(self.APP_ID)
@@ -43,8 +32,8 @@ class DataHandler:
 
         if not response.success():
             lark.logger.error(
-                f"client.auth.v3.app_access_token.internal failed, code: {response.code}, msg: {response.msg}, log_id: {response.get_log_id()}")
-            return
+                f"Failed to get app access token: {response.code}, msg: {response.msg}, log_id: {response.get_log_id()}")
+            return None
 
         response_data = json.loads(response.raw.content.decode('utf-8'))
         
@@ -52,15 +41,12 @@ class DataHandler:
         token = response_data.get('app_access_token')
         expire = response_data.get('expire')
         
-        lark.logger.info(f"App Access Token: {token}")
-        lark.logger.info(f"Expires in: {expire} seconds")
-        
+        lark.logger.info(f"App Access Token obtained")
         self.save_handler.set_feishu_app_token(token, expire)
         
         return token
-    
+
     def obtain_user_access_token(self, code: str):
-        # Taken partially from oapi-python-sdk/samples/api/authen/v1/create_access_token_sample.py
         request: CreateAccessTokenRequest = CreateAccessTokenRequest.builder() \
             .request_body(CreateAccessTokenRequestBody.builder()
                         .grant_type("authorization_code")
@@ -72,56 +58,112 @@ class DataHandler:
 
         if not response.success():
             lark.logger.error(
-                f"client.authen.v1.access_token.create failed, code: {response.code}, msg: {response.msg}, log_id: {response.get_log_id()}")
-            return
+                f"Failed to get user access token: {response.code}, msg: {response.msg}, log_id: {response.get_log_id()}")
+            return None
 
         response_data = json.loads(response.raw.content.decode('utf-8'))
         
-        # Extract token and expire time
         token_data = response_data['data']
         token = token_data.get('access_token')
         refresh_token = token_data.get('refresh_token')
         expire = token_data.get('expires_in')
         
-        lark.logger.info(f"User Access Token: {token}")
-        lark.logger.info(f"User Access Refresh Token: {refresh_token}")
-        lark.logger.info(f"Expires in: {expire} seconds")
-
-        self.save_handler.set_feishu_user_token(token, expire)
+        lark.logger.info("User tokens obtained")
         
+        self.save_handler.set_feishu_user_token(token, refresh_token, expire)
         return token
 
-    def get_primary_calendar(self, access_token: str):
-        # Lark's SDK uses the tenant access token for some reason, so we need to use requests for this
-        response = requests.post('https://open.feishu.cn/open-apis/calendar/v4/calendars/primary', headers={'Authorization': f'Bearer {access_token}'})
-        response_data = response.json()
+    def refresh_user_token(self):
+        """Refresh the user access token using the refresh token."""
+        refresh_token = self.save_handler.get_feishu_refresh_token()
+        if not refresh_token:
+            lark.logger.error("No refresh token available")
+            return None
 
-        lark.logger.info(response_data)
+        request: RefreshAccessTokenRequest = RefreshAccessTokenRequest.builder() \
+            .request_body(RefreshAccessTokenRequestBody.builder()
+                        .grant_type("refresh_token")
+                        .refresh_token(refresh_token)
+                        .build()) \
+            .build()
 
-        if response.status_code != 200:
-            lark.logger.error(f"Failed to get primary calendar, status code: {response.status_code}, response: {response_data}")
-            return
+        response: RefreshAccessTokenResponse = self.client.authen.v1.access_token.refresh(request)
+
+        if not response.success():
+            lark.logger.error(
+                f"Failed to refresh token: {response.code}, msg: {response.msg}, log_id: {response.get_log_id()}")
+            return None
+
+        response_data = json.loads(response.raw.content.decode('utf-8'))
+        token_data = response_data['data']
         
-        calendar = response_data.get('data').get('calendars')[0].get('calendar')
-        lark.logger.info(calendar)
+        token = token_data.get('access_token')
+        new_refresh_token = token_data.get('refresh_token')
+        expire = token_data.get('expires_in')
 
-        self.save_handler.set_feishu_calendar_id(calendar['calendar_id'])
+        lark.logger.info("User tokens refreshed")
+        self.save_handler.set_feishu_user_token(token, new_refresh_token, expire)
+        return token
 
-        return calendar['calendar_id']
-    
+    def verify_and_refresh_tokens(self):
+        """Verify tokens and refresh if needed."""
+        # Check user token first
+        if not self.save_handler.is_feishu_user_token_valid():
+            # Try to refresh the token
+            if self.save_handler.get_feishu_refresh_token():
+                lark.logger.info("Attempting to refresh user token")
+                if self.refresh_user_token():
+                    lark.logger.info("Successfully refreshed user token")
+                else:
+                    lark.logger.error("Failed to refresh user token")
+                    return False
+            else:
+                lark.logger.error("No refresh token available and user token is invalid")
+                return False
+
+        # Check app token
+        if not self.save_handler.is_feishu_app_token_valid():
+            lark.logger.info("App token invalid, obtaining new one")
+            if not self.obtain_app_access_token():
+                lark.logger.error("Failed to obtain new app token")
+                return False
+
+        return True
+
     def get_future_calendar_events(self, calendar_id: str, access_token: str):
+        """Get calendar events with automatic token refresh."""
+        # Verify and refresh tokens if needed
+        if not self.verify_and_refresh_tokens():
+            lark.logger.error("Failed to verify/refresh tokens")
+            return None
+
+        # Use the verified/refreshed token
+        access_token = self.save_handler.get_feishu_user_token()
+        
         payload = {'start_time': str(int(time.time()))}
-        response = requests.get(f'https://open.feishu.cn/open-apis/calendar/v4/calendars/{calendar_id}/events', headers={'Authorization': f'Bearer {access_token}'}, params=payload)
+        response = requests.get(
+            f'https://open.feishu.cn/open-apis/calendar/v4/calendars/{calendar_id}/events',
+            headers={'Authorization': f'Bearer {access_token}'},
+            params=payload
+        )
+        
+        if response.status_code == 401:  # Unauthorized
+            lark.logger.warning("Token unauthorized, attempting refresh")
+            if self.verify_and_refresh_tokens():
+                # Retry with new token
+                access_token = self.save_handler.get_feishu_user_token()
+                response = requests.get(
+                    f'https://open.feishu.cn/open-apis/calendar/v4/calendars/{calendar_id}/events',
+                    headers={'Authorization': f'Bearer {access_token}'},
+                    params=payload
+                )
+
         response_data = response.json()
 
-        lark.logger.info(response_data)
-
         if response.status_code != 200:
-            lark.logger.error(f"Failed to get calendar events, status code: {response.status_code}, response: {response_data}")
-            return
+            lark.logger.error(f"Failed to get calendar events: {response.status_code}, {response_data}")
+            return None
         
-        events = response_data.get('data').get('items')
-
-        lark.logger.info(events)
-
+        events = response_data.get('data', {}).get('items', [])
+        lark.logger.info(f"Retrieved {len(events)} events")
         return events
