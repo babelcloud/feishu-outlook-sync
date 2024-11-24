@@ -1,1 +1,5 @@
-lark_oapi O365 uvicorn fastapi datetime
+lark_oapi
+O365
+uvicorn
+fastapi
+datetime
