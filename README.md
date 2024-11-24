@@ -5,17 +5,19 @@ A Python application that provides real-time synchronization between Feishu (Lar
 ## Features
 
 - One-way sync from Feishu to Outlook
-- Real-time continuous synchronization
+- Support for multiple Feishu calendars
+- Real-time continuous synchronization (5-minute intervals)
 - Automatic timezone handling
 - Duplicate event detection
+- Token management with automatic refresh
 - Support for recurring events
-- Token-based authentication
-- Persistent token storage
+- Support for meeting URLs and locations
 
 ## Prerequisites
 
 ### Required Python Version
-- Python 3.9 or higher
+- Recommended Python 3.12 or higher
+- Not tested on other versions, cannot confirm stability
 
 ### Dependencies
 ```bash
@@ -61,8 +63,7 @@ pip install -r requirements.txt
 ```
 
 ## Configuration
-
-The application uses a YAML file for storing credentials and tokens. On first run, you'll be prompted to enter your credentials.
+The application uses a YAML file for storing credentials and tokens. Running `auth_handler.py` will automatically configure this for you.
 
 ### tokens.yaml
 ```yaml
@@ -76,9 +77,11 @@ feishu:
       expiration_time: null
     user_access_token:
       token: null
+      refresh_token: null
       expiration_time: null
-  calendar_id:
-    id: null
+  calendars:
+    calendar_id_1: "Calendar Name 1"
+    calendar_id_2: "Calendar Name 2"
 
 outlook:
   app_info:
@@ -96,68 +99,34 @@ outlook:
 
 ## Usage
 
-### Basic Usage
+### Setup & Usage
 
-1. Run the application:
+1. Run the authentication setup:
+```bash
+python auth_handler.py
+```
+This will:
+- Prompt for credentials
+- Handle OAuth authentication
+- Allow you to select Feishu calendars to sync
+- Store configuration in tokens.yaml
+
+2. Start the sync process:
 ```bash
 python main.py
 ```
 
-2. On first run:
-   - You'll be prompted to enter your Feishu and Outlook credentials
-   - Links will be given for authentication (OAuth)
-   - Follow the prompts to grant calendar access
+By default, the main.py will run continously, syncing every 5 minutes, you can modify the code to have it simply sync once per run, such that it can be ran with a cronjob or similar.
 
-3. The application will:
-   - Start syncing immediately
-   - Check for new events every 5 minutes
-   - Log sync activities to the console
+```python
+if __name__ == "__main__":
+    if not auth_handler.is_fully_configured():
+        print("Please run auth_handler.py first to setup authentication")
+        sys.exit(1)
 
-
-## Behavior Specifications
-
-### Event Synchronization
-- Only future events are synchronized
-- Events are matched based on title and start time
-- Timezone differences are automatically handled
-- Duplicate events are skipped
-
-### Authentication
-- Tokens are automatically refreshed
-- Failed authentications trigger re-authorization
-- Credentials are securely stored in tokens.yaml
-
-### Error Handling
-- Failed syncs are logged but don't stop the process
-- Network interruptions are handled gracefully
-- Authentication errors trigger automatic token refresh
-
-## Limitations
-
-- One-way sync only (Feishu → Outlook)
-- No support for event updates (only creation)
-- No attendee synchronization
-- Does not sync event cancellations
-
-## Troubleshooting
-
-### Common Issues
-
-1. Authentication Failures
-   - Verify credentials in tokens.yaml
-   - Check token expiration
-   - Ensure proper API permissions
-   - Restart the script after one run
-
-2. Missing Events
-   - Check timezone settings
-   - Verify event dates are in the future
-   - Check for duplicate detection issues
-
-3. Sync Issues
-   - Verify network connectivity
-   - Check both calendars are accessible
-   - Verify token permissions
+    auth_handler = AuthHandler()
+    sync_calendars(auth_handler)
+```
 
 ## License
 
