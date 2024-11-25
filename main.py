@@ -251,50 +251,61 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
 
 def sync_calendars(auth_handler: AuthHandler):
     """Main sync function that handles all calendars."""
-    # Verify tokens first
-    if not auth_handler.verify_feishu_tokens() or not auth_handler.verify_outlook_token():
-        print("Token verification failed")
+    # Verify Feishu tokens first
+    if not auth_handler.verify_feishu_tokens():
+        print("Feishu token verification failed")
+        return False
+
+    # Verify Outlook token
+    if not auth_handler.verify_outlook_token():
+        print("Outlook token verification failed")
         return False
 
     # Get Outlook calendar for comparison
-    outlook_events = get_outlook_events(auth_handler)
-    if outlook_events is None:
-        return False
+    try:
+        outlook_events = get_outlook_events(auth_handler)
+        if outlook_events is None:
+            print("Failed to fetch Outlook events")
+            return False
+            
+        print(f"Found {len(outlook_events or [])} Outlook events")
+        
+        # Process each selected Feishu calendar
+        total_synced = 0
+        total_skipped = 0
+        total_failed = 0
 
-    print(f"Found {len(outlook_events or [])} Outlook events")
+        for calendar_id, calendar_name in auth_handler.selected_calendars.items():
+            print(f"\nProcessing calendar: {calendar_name}")
+            
+            # Get Feishu events
+            feishu_events = get_feishu_events(auth_handler, calendar_id)
+            if feishu_events is None:
+                continue
+
+            # Filter future events
+            future_events = filter_future_events(feishu_events)
+            print(f"Found {len(future_events)} future events in {calendar_name}")
+
+            # Sync events
+            synced, skipped, failed = sync_calendar_events(
+                auth_handler, future_events, outlook_events
+            )
+            
+            total_synced += synced
+            total_skipped += skipped
+            total_failed += failed
+
+        print(f"\nSync Summary:")
+        print(f"- Events synced: {total_synced}")
+        print(f"- Events skipped: {total_skipped}")
+        print(f"- Events failed: {total_failed}")
+
+        return True
     
-    # Process each selected Feishu calendar
-    total_synced = 0
-    total_skipped = 0
-    total_failed = 0
-
-    for calendar_id, calendar_name in auth_handler.selected_calendars.items():
-        print(f"\nProcessing calendar: {calendar_name}")
-        
-        # Get Feishu events
-        feishu_events = get_feishu_events(auth_handler, calendar_id)
-        if feishu_events is None:
-            continue
-
-        # Filter future events
-        future_events = filter_future_events(feishu_events)
-        print(f"Found {len(future_events)} future events in {calendar_name}")
-
-        # Sync events
-        synced, skipped, failed = sync_calendar_events(
-            auth_handler, future_events, outlook_events
-        )
-        
-        total_synced += synced
-        total_skipped += skipped
-        total_failed += failed
-
-    print(f"\nSync Summary:")
-    print(f"- Events synced: {total_synced}")
-    print(f"- Events skipped: {total_skipped}")
-    print(f"- Events failed: {total_failed}")
-
-    return True
+    except Exception as e:
+        print(f"Error during sync: {e}")
+        return False
 
 def main():
     auth_handler = AuthHandler()

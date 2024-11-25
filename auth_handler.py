@@ -232,7 +232,63 @@ class AuthHandler:
 
     def verify_outlook_token(self) -> bool:
         """Verify and refresh Outlook token if needed."""
-        return self.authenticate_outlook()
+        try:
+            # First check if we have a valid token
+            if self.outlook_account.is_authenticated:
+                return True
+
+            # Check if we have a refresh token to use
+            token_dict = self.outlook_account.connection.token_backend.token
+            if token_dict and token_dict.get('refresh_token'):
+                try:
+                    print("Attempting to refresh Outlook token...")
+                    result = self.outlook_account.connection.refresh_token()
+                    if result:
+                        # Save the new tokens
+                        new_token = self.outlook_account.connection.token_backend.token
+                        self.set_outlook_token(
+                            new_token['access_token'],
+                            new_token.get('refresh_token', ''),
+                            3600
+                        )
+                        print("Successfully refreshed Outlook token")
+                        return True
+                    else:
+                        print("Token refresh failed")
+                except Exception as e:
+                    print(f"Error during token refresh: {e}")
+
+            # Only do full reauth if refresh failed or no refresh token
+            print("\nFull Outlook authentication required...")
+            
+            # Get credentials from config
+            client_id, client_secret, tenant_id = self.get_outlook_app_info()
+            
+            # Reinitialize account with proper credentials
+            self.outlook_account = Account(
+                (client_id, client_secret),
+                tenant_id=tenant_id,
+                scopes=['offline_access', 'Calendars.ReadWrite']
+            )
+            
+            result = self.outlook_account.authenticate()
+            
+            if result:
+                token = self.outlook_account.connection.token_backend.token
+                self.set_outlook_token(
+                    token['access_token'],
+                    token.get('refresh_token', ''),
+                    3600
+                )
+                self.set_outlook_authenticated(True)
+                return True
+            
+            print("Outlook authentication failed")
+            return False
+                
+        except Exception as e:
+            print(f"Error verifying Outlook token: {e}")
+            return False
 
     # Setup Methods
     def setup_feishu(self, app_id: str, app_secret: str) -> bool:
@@ -603,11 +659,17 @@ class AuthHandler:
         self._save_config()
 
     def get_outlook_token(self) -> Tuple[Optional[str], Optional[str], Optional[int]]:
-        """Get Outlook token info."""
+        """Get Outlook token info if valid."""
         token_data = self.config['outlook']['tokens']
+        
+        # Check if we have all required token data
         if (not token_data['access_token'] or 
             not token_data['refresh_token'] or
             not token_data['expiration_time']):
+            return None, None, None
+        
+        # Check if token is expired
+        if int(time.time()) > token_data['expiration_time']:
             return None, None, None
         
         return (token_data['access_token'], 
