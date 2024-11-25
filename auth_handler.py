@@ -120,51 +120,84 @@ class AuthHandler:
 
     def refresh_feishu_user_token(self) -> bool:
         """Refresh Feishu user token using refresh token."""
-        refresh_token = self.get_feishu_refresh_token()
-        if not refresh_token:
+        try:
+            refresh_token = self.get_feishu_refresh_token()
+            if not refresh_token:
+                print("No refresh token available")
+                return False
+
+            request = RefreshAccessTokenRequest.builder() \
+                .request_body(RefreshAccessTokenRequestBody.builder()
+                            .grant_type("refresh_token")
+                            .refresh_token(refresh_token)
+                            .build()) \
+                .build()
+
+            response = self.feishu_client.authen.v1.access_token.refresh(request)
+            if not response.success():
+                print(f"Failed to refresh token: {response.msg}")
+                return False
+
+            response_data = json.loads(response.raw.content.decode('utf-8'))
+            token_data = response_data.get('data', {})
+            
+            token = token_data.get('access_token')
+            new_refresh_token = token_data.get('refresh_token')
+            expire = token_data.get('expires_in')
+
+            if token and new_refresh_token and expire:
+                self.set_feishu_user_token(token, new_refresh_token, expire)
+                return True
+                
+            print("Missing token data in response")
             return False
 
-        request = RefreshAccessTokenRequest.builder() \
-            .request_body(RefreshAccessTokenRequestBody.builder()
-                        .grant_type("refresh_token")
-                        .refresh_token(refresh_token)
-                        .build()) \
-            .build()
-
-        response = self.feishu_client.authen.v1.access_token.refresh(request)
-        if not response.success():
+        except Exception as e:
+            print(f"Error refreshing user token: {e}")
             return False
-
-        response_data = json.loads(response.raw.content.decode('utf-8'))
-        token_data = response_data.get('data', {})
-        
-        token = token_data.get('access_token')
-        new_refresh_token = token_data.get('refresh_token')
-        expire = token_data.get('expires_in')
-
-        if token and new_refresh_token and expire:
-            self.set_feishu_user_token(token, new_refresh_token, expire)
-            return True
-        return False
 
     def verify_feishu_tokens(self) -> bool:
         """Verify and refresh Feishu tokens if needed."""
-        app_valid = self.is_feishu_app_token_valid()
-        user_valid = self.is_feishu_user_token_valid()
+        try:
+            app_valid = self.is_feishu_app_token_valid()
+            user_valid = self.is_feishu_user_token_valid()
 
-        if not app_valid:
-            app_valid = self.refresh_feishu_app_token()
-        
-        if not user_valid:
-            if self.get_feishu_refresh_token():
-                user_valid = self.refresh_feishu_user_token()
-            else:
-                # Need full reauth
-                oauth_code = self.feishu_oauth.obtain_oauth_code()
-                if oauth_code:
-                    user_valid = self.get_feishu_user_token_from_code(oauth_code)
+            # Try to refresh app token if needed
+            if not app_valid:
+                print("Refreshing Feishu app token...")
+                app_valid = self.refresh_feishu_app_token()
+                if not app_valid:
+                    print("Failed to refresh app token")
+                    return False
 
-        return app_valid and user_valid
+            # Try to refresh user token if needed
+            if not user_valid:
+                refresh_token = self.get_feishu_refresh_token()
+                if refresh_token:
+                    print("Attempting to refresh Feishu user token...")
+                    if self.refresh_feishu_user_token():
+                        print("Successfully refreshed Feishu user token")
+                        user_valid = True
+                    else:
+                        print("Failed to refresh user token")
+                else:
+                    print("No refresh token available for Feishu")
+
+                # Only if refresh token doesn't exist or refresh failed, do full reauth
+                if not user_valid:
+                    print("\nFull Feishu authentication required...")
+                    oauth_code = self.feishu_oauth.obtain_oauth_code()
+                    if oauth_code:
+                        user_valid = self.get_feishu_user_token_from_code(oauth_code)
+                    else:
+                        print("Failed to obtain Feishu OAuth code")
+                        return False
+
+            return app_valid and user_valid
+
+        except Exception as e:
+            print(f"Error verifying Feishu tokens: {e}")
+            return False
 
     # Outlook Token Management
     def _load_outlook_token(self):
@@ -317,25 +350,36 @@ class AuthHandler:
                         new_token = self.outlook_account.connection.token_backend.token
                         self.set_outlook_token(
                             new_token['access_token'],
-                            new_token['refresh_token'],
+                            new_token.get('refresh_token', ''),  # Get refresh token if present
                             3600  # Standard expiration
                         )
                         print("Successfully refreshed Outlook token")
                         return True
                 except Exception as e:
                     print(f"Token refresh failed: {e}")
-                    # Continue to full authentication if refresh fails
+                    # Only continue to full authentication if refresh fails
 
             # If we get here, we need a full authentication
             print("\nFull authentication required. Please sign in to your Outlook account in the browser window...")
+            
+            # Initialize with offline_access scope
+            self.outlook_account = Account(
+                (self.outlook_account.credentials[0], self.outlook_account.credentials[1]),
+                tenant_id=self.outlook_account.tenant_id,
+                scopes=['offline_access', 'Calendars.ReadWrite']  # Explicitly include offline_access
+            )
+            
             result = self.outlook_account.authenticate()
             
             if result:
                 # Save both access and refresh tokens
                 token = self.outlook_account.connection.token_backend.token
+                if 'refresh_token' not in token:
+                    print("Warning: No refresh token received. Token will expire in 1 hour.")
+                    
                 self.set_outlook_token(
                     token['access_token'],
-                    token['refresh_token'],
+                    token.get('refresh_token', ''),  # Get refresh token if present
                     3600  # Standard expiration
                 )
                 self.set_outlook_authenticated(True)
@@ -346,7 +390,7 @@ class AuthHandler:
         except Exception as e:
             print(f"Outlook authentication error: {e}")
             return False
-
+    
     def list_feishu_calendars(self) -> List[Dict]:
         """List all available Feishu calendars."""
         try:
@@ -405,14 +449,14 @@ class AuthHandler:
     def get_feishu_user_token_from_code(self, code: str) -> bool:
         """Get Feishu user token from OAuth code."""
         try:
-            request: CreateAccessTokenRequest = CreateAccessTokenRequest.builder() \
+            request = CreateAccessTokenRequest.builder() \
                 .request_body(CreateAccessTokenRequestBody.builder()
                             .grant_type("authorization_code")
                             .code(code)
                             .build()) \
                 .build()
 
-            response: CreateAccessTokenResponse = self.feishu_client.authen.v1.access_token.create(request)
+            response = self.feishu_client.authen.v1.access_token.create(request)
             if not response.success():
                 print(f"Failed to get access token: {response.msg}")
                 return False
@@ -426,6 +470,7 @@ class AuthHandler:
             
             if token and refresh_token and expire:
                 self.set_feishu_user_token(token, refresh_token, expire)
+                print("Successfully obtained new Feishu tokens")
                 return True
                 
             print("Missing token data in response")
@@ -516,9 +561,23 @@ class AuthHandler:
         return self.get_feishu_app_token() is not None
 
     def is_feishu_user_token_valid(self) -> bool:
-        """Check if Feishu user token is valid."""
-        return self.get_feishu_user_token() is not None
-
+        """Check if Feishu user token is valid and not expired."""
+        try:
+            token = self.get_feishu_user_token()
+            if not token:
+                return False
+                
+            # Add additional validation by making a test API call
+            response = requests.get(
+                'https://open.feishu.cn/open-apis/calendar/v4/calendars',
+                headers={'Authorization': f'Bearer {token}'}
+            )
+            
+            return response.status_code == 200
+                
+        except Exception:
+            return False
+        
     def set_outlook_app_info(self, client_id: str, client_secret: str, tenant_id: str) -> None:
         """Set Outlook app credentials."""
         self.config['outlook']['app_info'] = {
