@@ -1,3 +1,4 @@
+pyyaml
 lark_oapi
 O365
 uvicorn
