@@ -4,17 +4,17 @@ import requests
 from datetime import datetime, timezone, timedelta
 from auth_handler import AuthHandler
 
-def get_outlook_events(auth_handler: AuthHandler):
-    """Get Outlook events with proper query handling."""
+def get_outlook_events(auth_handler: AuthHandler, calendar_id: str):
+    """Get Outlook events for a specific calendar."""
     if not auth_handler.verify_outlook_token():
         print("Failed to verify Outlook token")
         return None
 
     try:
         schedule = auth_handler.outlook_account.schedule()
-        calendar = schedule.get_default_calendar()
+        calendar = schedule.get_calendar(calendar_id)
         if not calendar:
-            print("Failed to get default calendar")
+            print(f"Failed to get calendar with ID: {calendar_id}")
             return None
 
         # Get current time in UTC
@@ -24,21 +24,15 @@ def get_outlook_events(auth_handler: AuthHandler):
         print(f"Fetching events between: {now.isoformat()} and {end_time.isoformat()}")
 
         try:
-            # Create query with proper date filtering
             query = calendar.new_query('start').greater_equal(now)
             query.chain('and').on_attribute('end').less_equal(end_time)
-            
-            # Force select all needed fields
             query.select('subject', 'start', 'end', 'location', 'body', 'is_cancelled')
-            
-            print(f"Generated query: {query}")
             
             events = list(calendar.get_events(
                 query=query,
                 include_recurring=True,
                 batch=50
             ))
-            print(f"Raw events retrieved: {len(events)}")
             
             formatted_events = []
             seen_events = {}
@@ -48,7 +42,6 @@ def get_outlook_events(auth_handler: AuthHandler):
                     start_time = event.start.astimezone(timezone.utc)
                     end_time = event.end.astimezone(timezone.utc)
                     
-                    # Create key using both start and end time for uniqueness
                     event_key = f"{event.subject}|{int(start_time.timestamp())}|{int(end_time.timestamp())}"
                     
                     if event_key not in seen_events:
@@ -63,17 +56,10 @@ def get_outlook_events(auth_handler: AuthHandler):
                         }
                         formatted_events.append(formatted_event)
                         seen_events[event_key] = formatted_event
-                        print(f"Processing event: {event.subject} at {start_time}")
-                    else:
-                        print(f"Found duplicate - New: {event.subject} at {start_time}")
-                        print(f"Existing: {seen_events[event_key]['summary']} at "
-                              f"{datetime.fromtimestamp(int(seen_events[event_key]['start_time']['timestamp']), tz=timezone.utc)}")
-                        
                 except Exception as e:
                     print(f"Error processing individual event: {e}")
                     continue
             
-            print(f"Successfully processed {len(formatted_events)} events")
             return formatted_events
             
         except Exception as e:
@@ -83,6 +69,7 @@ def get_outlook_events(auth_handler: AuthHandler):
     except Exception as e:
         print(f"Error fetching Outlook events: {e}")
         return None
+
 
 def get_feishu_events(auth_handler: AuthHandler, calendar_id: str):
     """Get Feishu events with proper token verification."""
@@ -130,8 +117,8 @@ def filter_future_events(events):
             
     return future_events
 
-def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_events):
-    """Sync events from Feishu to Outlook."""
+def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_events, outlook_calendar_id: str):
+    """Sync events from Feishu to a specific Outlook calendar."""
     synced_count = 0
     skipped_count = 0
     failed_count = 0
@@ -145,14 +132,16 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
                 int(float(event['start_time']['timestamp']))
             )
             existing_events[key] = event['event_id']
-            print(f"Existing event found: {event.get('summary', '')} at {datetime.fromtimestamp(int(float(event['start_time']['timestamp'])), tz=timezone.utc)}")
         except Exception as e:
             print(f"Error processing existing event: {e}")
 
-    # Sync new events
+    # Get specific Outlook calendar
     schedule = auth_handler.outlook_account.schedule()
-    calendar = schedule.get_default_calendar()
-
+    calendar = schedule.get_calendar(outlook_calendar_id)
+    if not calendar:
+        print(f"Failed to get calendar with ID: {outlook_calendar_id}")
+        return 0, 0, 0
+        
     for event in (feishu_events or []):
         try:
             # Skip cancelled events
@@ -250,7 +239,7 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
     return synced_count, skipped_count, failed_count
 
 def sync_calendars(auth_handler: AuthHandler):
-    """Main sync function that handles all calendars."""
+    """Main sync function that handles all calendar pairs."""
     # Verify Feishu tokens first
     if not auth_handler.verify_feishu_tokens():
         print("Feishu token verification failed")
@@ -261,35 +250,43 @@ def sync_calendars(auth_handler: AuthHandler):
         print("Outlook token verification failed")
         return False
 
-    # Get Outlook calendar for comparison
     try:
-        outlook_events = get_outlook_events(auth_handler)
-        if outlook_events is None:
-            print("Failed to fetch Outlook events")
-            return False
-            
-        print(f"Found {len(outlook_events or [])} Outlook events")
-        
-        # Process each selected Feishu calendar
         total_synced = 0
         total_skipped = 0
         total_failed = 0
 
-        for calendar_id, calendar_name in auth_handler.selected_calendars.items():
-            print(f"\nProcessing calendar: {calendar_name}")
+        for pair in auth_handler.calendar_pairs:
+            feishu_id = pair['feishu']['id']
+            feishu_name = pair['feishu']['name']
+            outlook_id = pair['outlook']['id']
+            outlook_name = pair['outlook']['name']
+
+            print(f"\nProcessing calendar pair:")
+            print(f"Feishu: {feishu_name}")
+            print(f"Outlook: {outlook_name}")
             
             # Get Feishu events
-            feishu_events = get_feishu_events(auth_handler, calendar_id)
+            feishu_events = get_feishu_events(auth_handler, feishu_id)
             if feishu_events is None:
+                print(f"Failed to fetch events from Feishu calendar: {feishu_name}")
+                continue
+
+            # Get Outlook events for this specific calendar
+            outlook_events = get_outlook_events(auth_handler, outlook_id)
+            if outlook_events is None:
+                print(f"Failed to fetch events from Outlook calendar: {outlook_name}")
                 continue
 
             # Filter future events
             future_events = filter_future_events(feishu_events)
-            print(f"Found {len(future_events)} future events in {calendar_name}")
+            print(f"Found {len(future_events)} future events in {feishu_name}")
 
-            # Sync events
+            # Sync events to specific Outlook calendar
             synced, skipped, failed = sync_calendar_events(
-                auth_handler, future_events, outlook_events
+                auth_handler=auth_handler,
+                feishu_events=future_events,
+                outlook_events=outlook_events,
+                outlook_calendar_id=outlook_id
             )
             
             total_synced += synced
@@ -306,6 +303,7 @@ def sync_calendars(auth_handler: AuthHandler):
     except Exception as e:
         print(f"Error during sync: {e}")
         return False
+
 
 def main():
     auth_handler = AuthHandler()

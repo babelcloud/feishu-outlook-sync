@@ -53,6 +53,7 @@ class AuthHandler:
             return self._get_default_config()
 
     def _get_default_config(self) -> Dict:
+        """Get default configuration structure."""
         return {
             'feishu': {
                 'app_info': {
@@ -69,8 +70,7 @@ class AuthHandler:
                         'refresh_token': None,
                         'expiration_time': None
                     }
-                },
-                'calendars': {}  # Will store multiple calendar IDs with names
+                }
             },
             'outlook': {
                 'app_info': {
@@ -83,12 +83,11 @@ class AuthHandler:
                     'refresh_token': None,
                     'expiration_time': None
                 },
-                'calendar_id': {
-                    'id': None
-                },
                 'authenticated': False
-            }
+            },
+            'calendar_pairs': []  # Will store pairs of calendars
         }
+
 
     def _save_config(self) -> None:
         """Save configuration to YAML file."""
@@ -491,6 +490,40 @@ class AuthHandler:
             print(f"Outlook authentication error: {e}")
             return False
     
+    def list_outlook_calendars(self) -> List[Dict]:
+        """List all available Outlook calendars."""
+        try:
+            if not self.verify_outlook_token():
+                print("Failed to verify Outlook token")
+                return []
+
+            schedule = self.outlook_account.schedule()
+            calendars = []
+            
+            # Get default calendar
+            default_calendar = schedule.get_default_calendar()
+            if default_calendar:
+                calendars.append({
+                    'id': default_calendar.calendar_id,
+                    'name': 'Default Calendar',
+                    'is_default': True
+                })
+
+            # Get other calendars
+            for calendar in schedule.list_calendars():
+                if calendar.calendar_id != calendars[0]['id']:
+                    calendars.append({
+                        'id': calendar.calendar_id,
+                        'name': calendar.name,
+                        'is_default': False
+                    })
+
+            return calendars
+
+        except Exception as e:
+            print(f"Error listing Outlook calendars: {e}")
+            return []
+
     def list_feishu_calendars(self) -> List[Dict]:
         """List all available Feishu calendars."""
         try:
@@ -538,13 +571,18 @@ class AuthHandler:
         return all([
             feishu_id, feishu_secret,
             outlook_id, outlook_secret, tenant_id,
-            self.config['feishu']['calendars']
+            self.calendar_pairs  # Check for configured calendar pairs
         ])
 
     @property
     def selected_calendars(self) -> Dict[str, str]:
         """Get selected Feishu calendars."""
         return self.config['feishu']['calendars']
+    
+    @property
+    def calendar_pairs(self) -> List[Dict]:
+        """Get configured calendar pairs."""
+        return self.config.get('calendar_pairs', [])
 
     def get_feishu_user_token_from_code(self, code: str) -> bool:
         """Get Feishu user token from OAuth code."""
@@ -789,6 +827,87 @@ class AuthHandler:
         self.config['outlook']['authenticated'] = status
         self._save_config()
 
+    def setup_calendar_pairs(self) -> bool:
+        """Setup calendar pairs for syncing."""
+        try:
+            print("\nSetting up calendar pairs...")
+            
+            # Get Feishu calendars
+            feishu_calendars = self.list_feishu_calendars()
+            if not feishu_calendars:
+                print("No Feishu calendars found")
+                return False
+
+            # Get Outlook calendars
+            outlook_calendars = self.list_outlook_calendars()
+            if not outlook_calendars:
+                print("No Outlook calendars found")
+                return False
+
+            print("\nAvailable Feishu Calendars:")
+            for i, cal in enumerate(feishu_calendars, 1):
+                name = cal.get('calendar', {}).get('summary') or cal.get('summary', 'Unnamed Calendar')
+                calendar_id = cal.get('calendar', {}).get('calendar_id') or cal.get('calendar_id')
+                print(f"{i}. {name} (ID: {calendar_id})")
+
+            print("\nAvailable Outlook Calendars:")
+            for i, cal in enumerate(outlook_calendars, 1):
+                print(f"{i}. {cal['name']} (ID: {cal['id']})")
+
+            calendar_pairs = []
+            while True:
+                try:
+                    print("\nEnter a calendar pair (or press Enter to finish):")
+                    feishu_input = input("Enter Feishu calendar number: ").strip()
+                    if not feishu_input:
+                        break
+
+                    outlook_input = input("Enter Outlook calendar number: ").strip()
+                    if not outlook_input:
+                        break
+
+                    feishu_idx = int(feishu_input) - 1
+                    outlook_idx = int(outlook_input) - 1
+
+                    if (0 <= feishu_idx < len(feishu_calendars) and 
+                        0 <= outlook_idx < len(outlook_calendars)):
+                        
+                        feishu_cal = feishu_calendars[feishu_idx]
+                        outlook_cal = outlook_calendars[outlook_idx]
+
+                        pair = {
+                            'feishu': {
+                                'id': feishu_cal.get('calendar', {}).get('calendar_id') or feishu_cal.get('calendar_id'),
+                                'name': feishu_cal.get('calendar', {}).get('summary') or feishu_cal.get('summary')
+                            },
+                            'outlook': {
+                                'id': outlook_cal['id'],
+                                'name': outlook_cal['name']
+                            }
+                        }
+                        calendar_pairs.append(pair)
+                        print(f"Pair added: {pair['feishu']['name']} -> {pair['outlook']['name']}")
+                    else:
+                        print("Invalid calendar numbers")
+
+                except ValueError:
+                    print("Invalid input. Please enter numbers.")
+                except Exception as e:
+                    print(f"Error adding pair: {e}")
+
+            if not calendar_pairs:
+                print("No calendar pairs configured")
+                return False
+
+            self.config['calendar_pairs'] = calendar_pairs
+            self._save_config()
+            print(f"\nSuccessfully configured {len(calendar_pairs)} calendar pairs")
+            return True
+
+        except Exception as e:
+            print(f"Error setting up calendar pairs: {e}")
+            return False
+
 if __name__ == '__main__':
     auth_handler = AuthHandler()
     
@@ -811,11 +930,24 @@ if __name__ == '__main__':
         if not auth_handler.setup_outlook(outlook_id, outlook_secret, tenant_id):
             print("Outlook setup failed")
             exit(1)
+            
+        if not auth_handler.setup_calendar_pairs():
+            print("Calendar pair setup failed")
+            exit(1)
         
         print("\nSetup completed successfully!")
     else:
         print("Verifying tokens...")
         if auth_handler.verify_feishu_tokens() and auth_handler.verify_outlook_token():
             print("All tokens are valid!")
+            
+            # Allow reconfiguring calendar pairs if requested
+            reconfigure = input("\nWould you like to reconfigure calendar pairs? (y/N): ").lower().strip()
+            if reconfigure == 'y':
+                if auth_handler.setup_calendar_pairs():
+                    print("Calendar pairs updated successfully!")
+                else:
+                    print("Failed to update calendar pairs")
+            
         else:
             print("Some tokens need refresh. Run sync script to handle this automatically.")
