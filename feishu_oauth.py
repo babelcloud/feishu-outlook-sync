@@ -12,7 +12,7 @@ class FeishuOAuth:
         self.APP_ID = app_id
         self.APP_SECRET = app_secret
         self.REDIRECT_URI = "http://127.0.0.1:5000/callback"
-        self.SCOPE = "calendar:calendar:readonly calendar:calendar:read calendar:calendar.event:read"
+        self.SCOPE = "calendar:calendar:readonly calendar:calendar:read calendar:calendar.event:read offline_access"
         self.STATE = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
         
         # Initialize FastAPI and lark client
