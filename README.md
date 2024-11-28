@@ -16,11 +16,13 @@ A Python application that provides real-time synchronization between Feishu (Lar
 ## Prerequisites
 
 ### Required Python Version
-- Recommended Python 3.12 or higher
+- Recommended Python 3.12
+  - **NOTE**: Python 3.13 removed the `cgi` module, which the lark sdk relies on, if you are using 3.13+, install `legacy-cgi` with pip. (`pip install legacy-cgi`)
 - Not tested on other versions, cannot confirm stability
 
 ### Dependencies
 ```bash
+pip install pyyaml
 pip install O365
 pip install lark-oapi
 pip install pytz
@@ -32,7 +34,11 @@ pip install uvicorn
 
 #### Feishu (Lark) Setup
 1. Create a Feishu application in the [Feishu Open Platform](https://open.feishu.cn/)
-2. Enable Calendar permissions, and add a Bot
+2. Add the following API scopes:
+   - calendar:calendar.event:read
+   - calendar:calendar:read
+   - calendar:calendar:readonly
+   - offline_access
 3. Add a redirect URL in security settings: `http://127.0.0.1:5000/callback`
 4. Note down the following:
    - App ID
