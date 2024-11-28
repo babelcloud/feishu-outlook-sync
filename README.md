@@ -113,11 +113,19 @@ python auth_handler.py
 ```
 This will:
 - Prompt for credentials
-- Handle OAuth authentication
-- Allow you to select Feishu calendars to sync
+- Handle OAuth authentication for both services
+- Display available calendars from both Feishu and Outlook
+- Allow you to create calendar pairs for syncing
 - Store configuration in tokens.yaml
 
-2. Start the sync process:
+When creating calendar pairs:
+
+- You can pair the same Feishu calendar with multiple Outlook calendars
+- You can pair multiple Feishu calendars with the same Outlook calendar
+- Enter pairs one at a time, press Enter without input to finish
+
+
+1. Start the sync process:
 ```bash
 python main.py
 ```
