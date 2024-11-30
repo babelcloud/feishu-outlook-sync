@@ -5,7 +5,10 @@ A Python application that provides real-time synchronization between Feishu (Lar
 ## Features
 
 - One-way sync from Feishu to Outlook
-- Support for multiple Feishu calendars
+- Support for multiple calendar pairs with flexible configuration:
+  - Same Feishu calendar can sync to multiple Outlook calendars
+  - Same Outlook calendar can receive from multiple Feishu calendars
+- Multi-user support with separate configuration files
 - Real-time continuous synchronization (5-minute intervals)
 - Automatic timezone handling
 - Duplicate event detection
@@ -69,9 +72,11 @@ pip install -r requirements.txt
 ```
 
 ## Configuration
-The application uses a YAML file for storing credentials and tokens. Running `auth_handler.py` will automatically configure this for you.
+The application supports both single-user and multi-user configurations using YAML files.
 
-### tokens.yaml
+### Single User Setup
+For single user setup, the application uses a `tokens.yaml` file in the root directory:
+
 ```yaml
 feishu:
   app_info:
@@ -85,9 +90,6 @@ feishu:
       token: null
       refresh_token: null
       expiration_time: null
-  calendars:
-    calendar_id_1: "Calendar Name 1"
-    calendar_id_2: "Calendar Name 2"
 
 outlook:
   app_info:
@@ -98,14 +100,37 @@ outlook:
     access_token: null
     refresh_token: null
     expiration_time: null
-  calendar_id:
-    id: null
   authenticated: false
+
+calendar_pairs:
+  - feishu:
+      id: feishu_calendar_id_1
+      name: "Feishu Calendar 1"
+    outlook:
+      id: outlook_calendar_id_1
+      name: "Outlook Calendar 1"
+  - feishu:
+      id: feishu_calendar_id_1  # Same Feishu calendar
+      name: "Feishu Calendar 1"
+    outlook:
+      id: outlook_calendar_id_2  # Different Outlook calendar
+      name: "Outlook Calendar 2"
 ```
+
+### Multi-User Setup
+For multi-user setup, create a `configs` directory and place individual YAML files for each user:
+```
+configs/
+  user1.yaml
+  user2.yaml
+  team1.yaml
+```
+
+Each YAML file in the configs directory should follow the same format as tokens.yaml.
 
 ## Usage
 
-### Setup & Usage
+### Single User Setup
 
 1. Run the authentication setup:
 ```bash
@@ -118,19 +143,37 @@ This will:
 - Allow you to create calendar pairs for syncing
 - Store configuration in tokens.yaml
 
-When creating calendar pairs:
-
-- You can pair the same Feishu calendar with multiple Outlook calendars
-- You can pair multiple Feishu calendars with the same Outlook calendar
-- Enter pairs one at a time, press Enter without input to finish
-
-
-1. Start the sync process:
+2. Start the sync process:
 ```bash
 python main.py
 ```
 
-By default, the main.py will run continously, syncing every 5 minutes, you can modify the code to have it simply sync once per run, such that it can be ran with a cronjob or similar.
+### Multi-User Setup
+
+1. Create configuration files for each user in the `configs` directory
+2. Run the multi-user sync:
+```bash
+# Use default 'configs' directory
+python multi_sync.py
+
+# Or specify custom config directory
+python multi_sync.py path/to/configs
+```
+
+The multi-user sync will:
+- Validate all YAML configurations
+- Report configuration status
+- Run independent sync processes for each valid configuration
+- Monitor and report sync status
+
+### Configuration Options
+
+When creating calendar pairs:
+- You can pair the same Feishu calendar with multiple Outlook calendars
+- You can pair multiple Feishu calendars with the same Outlook calendar
+- Enter pairs one at a time, press Enter without input to finish
+
+By default, both main.py and multi_sync.py will run continuously, syncing every 5 minutes. For cron job usage, modify the code to sync once per run:
 
 ```python
 if __name__ == "__main__":
