@@ -2,6 +2,9 @@
 
 A Python application that provides real-time synchronization between Feishu (Lark) and Microsoft Outlook calendars.
 
+> [!WARNING]  
+> This script will delete any events on the Outlook calendar that are not in the Feishu Calendar.
+
 ## Features
 
 - One-way sync from Feishu to Outlook

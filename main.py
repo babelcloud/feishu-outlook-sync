@@ -85,7 +85,7 @@ def get_outlook_events(auth_handler: AuthHandler, calendar_id: str):
         return None
 
 def get_feishu_events(auth_handler: AuthHandler, calendar_id: str):
-    """Get Feishu events with proper token verification."""
+    """Get Feishu events with proper token verification, including deleted events."""
     if not auth_handler.verify_feishu_tokens():
         print("Failed to verify Feishu tokens")
         return None
@@ -96,19 +96,41 @@ def get_feishu_events(auth_handler: AuthHandler, calendar_id: str):
             print("Failed to get Feishu user token")
             return None
 
-        payload = {'start_time': str(int(time.time()))}
-        response = requests.get(
-            f'https://open.feishu.cn/open-apis/calendar/v4/calendars/{calendar_id}/events',
-            headers={'Authorization': f'Bearer {user_token}'},
-            params=payload
-        )
+        # Get current time for pagination start
+        start_time = str(int(time.time()))
+        all_events = []
+        page_token = None
 
-        if response.status_code != 200:
-            print(f"Failed to get Feishu events: {response.status_code}")
-            return None
+        while True:
+            # Prepare request parameters
+            params = {
+                'start_time': start_time,
+                'page_size': 100  # Maximum allowed by API
+            }
+            if page_token:
+                params['page_token'] = page_token
 
-        response_data = response.json()
-        return response_data.get('data', {}).get('items', [])
+            response = requests.get(
+                f'https://open.feishu.cn/open-apis/calendar/v4/calendars/{calendar_id}/events',
+                headers={'Authorization': f'Bearer {user_token}'},
+                params=params
+            )
+
+            if response.status_code != 200:
+                print(f"Failed to get Feishu events: {response.status_code}")
+                return None
+
+            response_data = response.json()
+            items = response_data.get('data', {}).get('items', [])
+            all_events.extend(items)
+
+            # Check for more pages
+            page_token = response_data.get('data', {}).get('page_token')
+            if not page_token:
+                break
+
+        print(f"Retrieved {len(all_events)} events from Feishu")
+        return all_events
 
     except Exception as e:
         print(f"Error fetching Feishu events: {e}")
@@ -131,34 +153,73 @@ def filter_future_events(events):
     return future_events
 
 def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_events, outlook_calendar_id: str) -> Tuple[int, int, int]:
-    """Sync events from Feishu to specific Outlook calendar."""
+    """Sync events (including deletions) from Feishu to specific Outlook calendar."""
     synced_count = 0
     skipped_count = 0
     failed_count = 0
+    deleted_count = 0
 
-    # Create lookup map for existing events
+    # Create lookup maps for existing events
     existing_events = {}
+    feishu_event_map = {}
+    
+    # Map Outlook events by summary and start time
     for event in (outlook_events or []):
         try:
             key = (
                 event.get('summary', ''),
                 int(float(event['start_time']['timestamp']))
             )
-            existing_events[key] = event['event_id']
+            existing_events[key] = {
+                'id': event['event_id'],
+                'status': event.get('status', 'confirmed')
+            }
             print(f"Existing event found: {event.get('summary', '')} at {datetime.fromtimestamp(int(float(event['start_time']['timestamp'])), tz=timezone.utc)}")
         except Exception as e:
             print(f"Error processing existing event: {e}")
+
+    # Map Feishu events by summary and start time
+    for event in (feishu_events or []):
+        try:
+            summary = event.get('summary')
+            start_timestamp = event.get('start_time', {}).get('timestamp')
+            if summary and start_timestamp:
+                key = (summary, int(float(start_timestamp)))
+                feishu_event_map[key] = event.get('status', 'confirmed')
+        except Exception as e:
+            print(f"Error mapping Feishu event: {e}")
 
     # Get specific calendar for syncing
     schedule = auth_handler.outlook_account.schedule()
     calendar = schedule.get_calendar(outlook_calendar_id)
     if not calendar:
         print(f"Failed to get calendar with ID: {outlook_calendar_id}")
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
+    # Process deletions first
+    for key, outlook_data in existing_events.items():
+        summary, start_time = key
+        
+        # If event exists in Outlook but not in Feishu, or is cancelled in Feishu
+        if key not in feishu_event_map or feishu_event_map[key] == 'cancelled':
+            try:
+                print(f"\nProcessing deletion for event: {summary}")
+                event = calendar.get_event(outlook_data['id'])
+                if event:
+                    if event.delete():
+                        print(f"Successfully deleted event: {summary}")
+                        deleted_count += 1
+                    else:
+                        print(f"Failed to delete event: {summary}")
+                        failed_count += 1
+            except Exception as e:
+                print(f"Error deleting event: {e}")
+                failed_count += 1
+
+    # Process regular events (new and updates)
     for event in (feishu_events or []):
         try:
-            # Skip cancelled events
+            # Skip already cancelled events
             if event.get('status') == 'cancelled':
                 print("Skipping cancelled event")
                 continue
@@ -250,7 +311,10 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
             print(f"Error processing event for sync: {e}")
             failed_count += 1
 
-    return synced_count, skipped_count, failed_count
+    print(f"\nDeletion Summary for calendar {outlook_calendar_id}:")
+    print(f"- Events deleted: {deleted_count}")
+    
+    return synced_count, skipped_count, failed_count, deleted_count
 
 def sync_calendars(auth_handler: AuthHandler) -> bool:
     """Main sync function that handles all calendar pairs."""
@@ -266,6 +330,7 @@ def sync_calendars(auth_handler: AuthHandler) -> bool:
         total_synced = 0
         total_skipped = 0
         total_failed = 0
+        total_deleted = 0
 
         for pair in auth_handler.calendar_pairs:
             feishu_id = pair['feishu']['id']
@@ -291,12 +356,12 @@ def sync_calendars(auth_handler: AuthHandler) -> bool:
                 print(f"Failed to fetch Feishu events for calendar: {feishu_name}")
                 continue
 
-            # Filter future events
+            # Filter future events but keep deleted ones
             future_events = filter_future_events(feishu_events)
             print(f"Found {len(future_events)} future events in {feishu_name}")
 
-            # Sync events to specific Outlook calendar
-            synced, skipped, failed = sync_calendar_events(
+            # Sync events including deletions
+            synced, skipped, failed, deleted = sync_calendar_events(
                 auth_handler,
                 future_events,
                 outlook_events,
@@ -306,11 +371,13 @@ def sync_calendars(auth_handler: AuthHandler) -> bool:
             total_synced += synced
             total_skipped += skipped
             total_failed += failed
+            total_deleted += deleted
 
         print(f"\nSync Summary:")
         print(f"- Events synced: {total_synced}")
         print(f"- Events skipped: {total_skipped}")
         print(f"- Events failed: {total_failed}")
+        print(f"- Events deleted: {total_deleted}")
 
         return True
     
