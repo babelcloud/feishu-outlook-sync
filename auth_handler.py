@@ -1,12 +1,12 @@
-from datetime import datetime, timezone
 import json
 import os
 import time
-from typing import Dict, List, Optional, Tuple
 import yaml
 import requests
-from O365 import Account
 import lark_oapi as lark
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
+from O365 import Account
 from lark_oapi.api.authen.v1 import *
 from lark_oapi.api.auth.v3 import *
 
