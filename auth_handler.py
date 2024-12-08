@@ -414,8 +414,16 @@ class AuthHandler:
         """Initial Outlook setup."""
         try:
             print("\nInitializing Outlook setup...")
+            
+            # Store the credentials first
             self.set_outlook_app_info(client_id, client_secret, tenant_id)
-            self._setup_clients()
+            
+            # Initialize the account with the provided credentials
+            self.outlook_account = Account(
+                (client_id, client_secret),
+                tenant_id=tenant_id,
+                scopes=['offline_access', 'Calendars.ReadWrite']
+            )
             
             # Authenticate with Outlook
             print("\nStarting Outlook authentication...")
@@ -437,6 +445,9 @@ class AuthHandler:
             if self.outlook_account.is_authenticated:
                 return True
 
+            # Get credentials from config
+            client_id, client_secret, tenant_id = self.get_outlook_app_info()
+            
             # Check if we have a refresh token to use
             token_dict = self.outlook_account.connection.token_backend.token
             if token_dict and 'refresh_token' in token_dict:
@@ -449,43 +460,48 @@ class AuthHandler:
                         new_token = self.outlook_account.connection.token_backend.token
                         self.set_outlook_token(
                             new_token['access_token'],
-                            new_token.get('refresh_token', ''),  # Get refresh token if present
-                            3600  # Standard expiration
+                            new_token.get('refresh_token', ''),
+                            3600
                         )
                         print("Successfully refreshed Outlook token")
                         return True
                 except Exception as e:
                     print(f"Token refresh failed: {e}")
-                    # Only continue to full authentication if refresh fails
 
             # If we get here, we need a full authentication
             print("\nFull authentication required. Please sign in to your Outlook account in the browser window...")
             
-            # Initialize with offline_access scope
-            self.outlook_account = Account(
-                (self.outlook_account.credentials[0], self.outlook_account.credentials[1]),
-                tenant_id=self.outlook_account.tenant_id,
-                scopes=['offline_access', 'Calendars.ReadWrite']  # Explicitly include offline_access
-            )
-            
-            result = self.outlook_account.authenticate()
-            
-            if result:
-                # Save both access and refresh tokens
-                token = self.outlook_account.connection.token_backend.token
-                if 'refresh_token' not in token:
-                    print("Warning: No refresh token received. Token will expire in 1 hour.")
-                    
-                self.set_outlook_token(
-                    token['access_token'],
-                    token.get('refresh_token', ''),  # Get refresh token if present
-                    3600  # Standard expiration
+            try:
+                # Create a new account instance with the stored credentials
+                self.outlook_account = Account(
+                    (client_id, client_secret),
+                    tenant_id=tenant_id,
+                    scopes=['offline_access', 'Calendars.ReadWrite']
                 )
-                self.set_outlook_authenticated(True)
-                return True
                 
-            return False
-            
+                result = self.outlook_account.authenticate()
+                
+                if result:
+                    # Save both access and refresh tokens
+                    token = self.outlook_account.connection.token_backend.token
+                    if 'refresh_token' not in token:
+                        print("Warning: No refresh token received. Token will expire in 1 hour.")
+                        
+                    self.set_outlook_token(
+                        token['access_token'],
+                        token.get('refresh_token', ''),
+                        3600
+                    )
+                    self.set_outlook_authenticated(True)
+                    return True
+                
+                print("Authentication failed")
+                return False
+                
+            except Exception as e:
+                print(f"Error during authentication: {e}")
+                return False
+                
         except Exception as e:
             print(f"Outlook authentication error: {e}")
             return False
