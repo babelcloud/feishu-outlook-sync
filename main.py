@@ -158,6 +158,9 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
     skipped_count = 0
     failed_count = 0
     deleted_count = 0
+    
+    # Get current timestamp for filtering
+    current_timestamp = int(time.time())
 
     # Create lookup maps for existing events
     existing_events = {}
@@ -166,15 +169,22 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
     # Map Outlook events by summary and start time
     for event in (outlook_events or []):
         try:
-            key = (
-                event.get('summary', ''),
-                int(float(event['start_time']['timestamp']))
-            )
-            existing_events[key] = {
-                'id': event['event_id'],
-                'status': event.get('status', 'confirmed')
-            }
-            print(f"Existing event found: {event.get('summary', '')} at {datetime.fromtimestamp(int(float(event['start_time']['timestamp'])), tz=timezone.utc)}")
+            start_timestamp = int(float(event['start_time']['timestamp']))
+            
+            # Only consider future events for syncing
+            if start_timestamp >= current_timestamp:
+                key = (
+                    event.get('summary', ''),
+                    start_timestamp
+                )
+                existing_events[key] = {
+                    'id': event['event_id'],
+                    'status': event.get('status', 'confirmed'),
+                    'start_timestamp': start_timestamp
+                }
+                print(f"Future existing event found: {event.get('summary', '')} at {datetime.fromtimestamp(start_timestamp, tz=timezone.utc)}")
+            else:
+                print(f"Skipping past event from consideration: {event.get('summary', '')} at {datetime.fromtimestamp(start_timestamp, tz=timezone.utc)}")
         except Exception as e:
             print(f"Error processing existing event: {e}")
 
@@ -184,8 +194,10 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
             summary = event.get('summary')
             start_timestamp = event.get('start_time', {}).get('timestamp')
             if summary and start_timestamp:
-                key = (summary, int(float(start_timestamp)))
-                feishu_event_map[key] = event.get('status', 'confirmed')
+                start_timestamp = int(float(start_timestamp))
+                if start_timestamp >= current_timestamp:
+                    key = (summary, start_timestamp)
+                    feishu_event_map[key] = event.get('status', 'confirmed')
         except Exception as e:
             print(f"Error mapping Feishu event: {e}")
 
@@ -196,25 +208,27 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
         print(f"Failed to get calendar with ID: {outlook_calendar_id}")
         return 0, 0, 0, 0
 
-    # Process deletions first
+    # Process deletions only for future events
     for key, outlook_data in existing_events.items():
-        summary, start_time = key
+        summary, start_timestamp = key
         
-        # If event exists in Outlook but not in Feishu, or is cancelled in Feishu
-        if key not in feishu_event_map or feishu_event_map[key] == 'cancelled':
-            try:
-                print(f"\nProcessing deletion for event: {summary}")
-                event = calendar.get_event(outlook_data['id'])
-                if event:
-                    if event.delete():
-                        print(f"Successfully deleted event: {summary}")
-                        deleted_count += 1
-                    else:
-                        print(f"Failed to delete event: {summary}")
-                        failed_count += 1
-            except Exception as e:
-                print(f"Error deleting event: {e}")
-                failed_count += 1
+        # Double check timestamp before deletion
+        if start_timestamp >= current_timestamp:
+            # If event exists in Outlook but not in Feishu, or is cancelled in Feishu
+            if key not in feishu_event_map or feishu_event_map[key] == 'cancelled':
+                try:
+                    print(f"\nProcessing deletion for future event: {summary} at {datetime.fromtimestamp(start_timestamp, tz=timezone.utc)}")
+                    event = calendar.get_event(outlook_data['id'])
+                    if event:
+                        if event.delete():
+                            print(f"Successfully deleted event: {summary}")
+                            deleted_count += 1
+                        else:
+                            print(f"Failed to delete event: {summary}")
+                            failed_count += 1
+                except Exception as e:
+                    print(f"Error deleting event: {e}")
+                    failed_count += 1
 
     # Process regular events (new and updates)
     for event in (feishu_events or []):
@@ -238,8 +252,16 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
                 failed_count += 1
                 continue
 
-            event_key = (summary, int(float(start_timestamp)))
-            event_start = datetime.fromtimestamp(int(float(start_timestamp)), tz=timezone.utc)
+            # Convert to integer timestamp
+            start_timestamp = int(float(start_timestamp))
+            
+            # Skip past events
+            if start_timestamp < current_timestamp:
+                print(f"Skipping past event: {summary}")
+                continue
+
+            event_key = (summary, start_timestamp)
+            event_start = datetime.fromtimestamp(start_timestamp, tz=timezone.utc)
             
             if event_key in existing_events:
                 print(f"\nSkipping existing event: {summary}")
