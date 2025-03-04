@@ -6,6 +6,12 @@ import threading
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from main import run_sync, run_continuous_sync
+from auth_handler import AuthHandler
+from db_handler import DBHandler
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 @dataclass
 class SyncConfig:
@@ -15,158 +21,242 @@ class SyncConfig:
     error: Optional[str] = None
 
 class MultiSync:
+    """Class that handles multiple sync configurations."""
+    
     def __init__(self, config_dir: str = 'configs'):
         self.config_dir = config_dir
         self.configs: List[SyncConfig] = []
-        self.sync_threads: Dict[str, threading.Thread] = {}
+        self.threads: Dict[str, threading.Thread] = {}
+        self.stop_events: Dict[str, threading.Event] = {}
         
-    def validate_yaml(self, path: str) -> SyncConfig:
-        """Validate YAML file format and content."""
-        try:
-            # Get name from filename
-            name = os.path.splitext(os.path.basename(path))[0]
-            
-            # Validate file extension
-            if not path.endswith('.yaml'):
-                return SyncConfig(path, name, False, "Not a YAML file")
-                
-            with open(path, 'r') as file:
-                config = yaml.safe_load(file)
-                
-            # Validate required sections
-            required_sections = ['feishu', 'outlook', 'calendar_pairs']
-            missing_sections = [s for s in required_sections if s not in config]
-            
-            if missing_sections:
-                return SyncConfig(
-                    path, name, False, 
-                    f"Missing required sections: {', '.join(missing_sections)}"
-                )
-                
-            # Validate subsections
-            if not config['feishu'].get('app_info'):
-                return SyncConfig(path, name, False, "Missing Feishu app info")
-                
-            if not config['outlook'].get('app_info'):
-                return SyncConfig(path, name, False, "Missing Outlook app info")
-                
-            # Validate calendar pairs format
-            if not isinstance(config['calendar_pairs'], list):
-                return SyncConfig(
-                    path, name, False, 
-                    "calendar_pairs must be a list"
-                )
-                
-            for pair in config['calendar_pairs']:
-                if not all(k in pair for k in ['feishu', 'outlook']):
-                    return SyncConfig(
-                        path, name, False, 
-                        "Invalid calendar pair format"
-                    )
-                    
-            return SyncConfig(path, name, True)
-            
-        except yaml.YAMLError as e:
-            return SyncConfig(path, name, False, f"Invalid YAML format: {str(e)}")
-        except Exception as e:
-            return SyncConfig(path, name, False, str(e))
-
-    def load_configs(self) -> None:
-        """Load and validate all YAML files in config directory."""
-        self.configs = []
+        # Initialize database handler
+        self.db_handler = DBHandler(
+            host=os.environ.get('PGHOST', 'ep-red-brook-aawc47cf-pooler.westus3.azure.neon.tech'),
+            database=os.environ.get('PGDATABASE', 'CalendarSync'),
+            user=os.environ.get('PGUSER', 'CalendarSync_owner'),
+            password=os.environ.get('PGPASSWORD', 'npg_Had49rjAFUVg')
+        )
+        
+        if not self.db_handler.connect():
+            print("Failed to connect to database, proceeding without database logging")
+            self.db_handler = None
         
         # Create config directory if it doesn't exist
-        if not os.path.exists(self.config_dir):
-            os.makedirs(self.config_dir)
-            print(f"Created config directory: {self.config_dir}")
-            return
+        os.makedirs(self.config_dir, exist_ok=True)
 
-        # Load and validate each YAML file
+    def validate_yaml(self, path: str) -> SyncConfig:
+        """Validate that a YAML file is a valid configuration."""
+        try:
+            # Parse filename to get sync name
+            filename = os.path.basename(path)
+            name = os.path.splitext(filename)[0]
+            
+            with open(path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            # Basic validation
+            if not isinstance(config, dict):
+                return SyncConfig(path=path, name=name, valid=False, error="Configuration must be a dictionary")
+            
+            # Check for required sections
+            if 'feishu' not in config:
+                return SyncConfig(path=path, name=name, valid=False, error="Missing 'feishu' section")
+            
+            if 'outlook' not in config:
+                return SyncConfig(path=path, name=name, valid=False, error="Missing 'outlook' section")
+            
+            # Check for required Feishu credentials
+            feishu = config['feishu']
+            if not isinstance(feishu, dict):
+                return SyncConfig(path=path, name=name, valid=False, error="Feishu configuration must be a dictionary")
+            
+            required_feishu_keys = ['app_id', 'app_secret', 'app_token', 'user_token', 'refresh_token']
+            missing_keys = [key for key in required_feishu_keys if key not in feishu]
+            if missing_keys:
+                return SyncConfig(path=path, name=name, valid=False, error=f"Missing Feishu keys: {', '.join(missing_keys)}")
+            
+            # Check for required Outlook credentials
+            outlook = config['outlook']
+            if not isinstance(outlook, dict):
+                return SyncConfig(path=path, name=name, valid=False, error="Outlook configuration must be a dictionary")
+            
+            required_outlook_keys = ['client_id', 'client_secret', 'tenant_id', 'token', 'refresh_token']
+            missing_keys = [key for key in required_outlook_keys if key not in outlook]
+            if missing_keys:
+                return SyncConfig(path=path, name=name, valid=False, error=f"Missing Outlook keys: {', '.join(missing_keys)}")
+            
+            # Check for calendars
+            if 'calendars' not in config:
+                return SyncConfig(path=path, name=name, valid=False, error="Missing 'calendars' section with calendar pairs")
+            
+            return SyncConfig(path=path, name=name, valid=True)
+            
+        except Exception as e:
+            return SyncConfig(path=path, name=name, valid=False, error=str(e))
+
+    def load_configs(self) -> None:
+        """Load and validate all configs in the config directory."""
+        self.configs = []
+        
+        if not os.path.isdir(self.config_dir):
+            print(f"Config directory {self.config_dir} does not exist")
+            return
+        
         for filename in os.listdir(self.config_dir):
-            if filename.endswith('.yaml'):
+            if filename.endswith('.yaml') or filename.endswith('.yml'):
                 path = os.path.join(self.config_dir, filename)
                 config = self.validate_yaml(path)
                 self.configs.append(config)
                 
-        # Sort configs by name for consistent ordering
-        self.configs.sort(key=lambda x: x.name)
+        # Log the loaded configurations to the database
+        if self.db_handler:
+            sync_id = self.db_handler.log_sync_start("multi_sync_load_configs")
+            message = f"Loaded {len(self.configs)} configurations: {', '.join([c.name for c in self.configs])}"
+            self.db_handler.log_sync_end(sync_id, True, message)
 
     def print_status(self) -> None:
-        """Print status of all configurations."""
-        print("\nConfiguration Status:")
-        print("=" * 50)
+        """Print current status of all configurations."""
+        print("\nSync Configurations:")
+        print("---------------------")
         
-        if not self.configs:
-            print(f"No YAML files found in {self.config_dir}")
-            return
-            
-        for config in self.configs:
-            status = "Valid" if config.valid else "Invalid"
-            print(f"\nConfig: {config.name}")
-            print(f"Status: {status}")
-            print(f"Path: {config.path}")
-            if config.error:
-                print(f"Error: {config.error}")
-        print("\n" + "=" * 50)
+        valid_count = 0
+        invalid_count = 0
+        
+        for idx, config in enumerate(self.configs, 1):
+            status = "VALID" if config.valid else "INVALID"
+            print(f"{idx}. {config.name} - {status}")
+            if not config.valid and config.error:
+                print(f"   Error: {config.error}")
+                
+            if config.valid:
+                valid_count += 1
+            else:
+                invalid_count += 1
+                
+        print("\nSummary:")
+        print(f"- Total configurations: {len(self.configs)}")
+        print(f"- Valid: {valid_count}")
+        print(f"- Invalid: {invalid_count}")
 
     def run_sync_for_config(self, config: SyncConfig) -> None:
-        """Run continuous sync for a single configuration."""
-        try:
-            run_continuous_sync(config.path)
-        except Exception as e:
-            print(f"Error in sync thread for {config.name}: {e}")
+        """Run sync for a specific configuration."""
+        if not config.valid:
+            print(f"Cannot sync {config.name} due to invalid configuration: {config.error}")
+            return
+            
+        print(f"\nStarting sync for {config.name}")
+        
+        # Log the sync start to database
+        sync_id = -1
+        if self.db_handler:
+            sync_id = self.db_handler.log_sync_start(config.name)
+            
+        success = main.run_sync(config.path)
+        
+        # Log the sync result to database
+        if self.db_handler and sync_id > 0:
+            status_message = "Sync completed successfully" if success else "Sync failed"
+            self.db_handler.log_sync_end(sync_id, success, status_message)
 
     def start_sync(self) -> None:
         """Start sync process for all valid configurations."""
-        self.load_configs()
-        self.print_status()
+        # Make sure main.py has access to our database handler
+        main.db_handler = self.db_handler
         
-        valid_configs = [c for c in self.configs if c.valid]
+        valid_configs = [config for config in self.configs if config.valid]
         
         if not valid_configs:
-            print("\nNo valid configurations found")
+            print("No valid configurations found. Please check your config files.")
             return
             
-        print(f"\nStarting sync for {len(valid_configs)} configurations...")
+        print(f"\nStarting sync process for {len(valid_configs)} configuration(s)")
         
-        # Start a thread for each valid configuration
+        # Log the overall sync start to database
+        overall_sync_id = -1
+        if self.db_handler:
+            overall_sync_id = self.db_handler.log_sync_start("multi_sync_all")
+        
         for config in valid_configs:
-            print(f"\nStarting sync thread for {config.name}")
-            thread = threading.Thread(
-                target=self.run_sync_for_config,
-                args=(config,),
-                name=f"sync_{config.name}"
-            )
-            thread.daemon = True
-            thread.start()
-            self.sync_threads[config.name] = thread
+            self.run_sync_for_config(config)
             
+        # Log the overall sync completion to database
+        if self.db_handler and overall_sync_id > 0:
+            message = f"Completed sync for {len(valid_configs)} configuration(s)"
+            self.db_handler.log_sync_end(overall_sync_id, True, message)
+            
+    def start_continuous_sync(self, interval: int = 300) -> None:
+        """Start continuous sync process for all valid configurations."""
+        # Make sure main.py has access to our database handler
+        main.db_handler = self.db_handler
+        
+        valid_configs = [config for config in self.configs if config.valid]
+        
+        if not valid_configs:
+            print("No valid configurations found. Please check your config files.")
+            return
+            
+        print(f"\nStarting continuous sync process for {len(valid_configs)} configuration(s)")
+        print(f"Sync interval: {interval} seconds")
+        
+        # Create stop events for each config
+        for config in valid_configs:
+            self.stop_events[config.name] = threading.Event()
+        
         try:
-            # Monitor threads and report status
             while True:
-                alive_threads = {
-                    name: thread 
-                    for name, thread in self.sync_threads.items() 
-                    if thread.is_alive()
-                }
+                # Log the overall sync cycle start to database
+                overall_sync_id = -1
+                if self.db_handler:
+                    overall_sync_id = self.db_handler.log_sync_start("multi_sync_cycle")
                 
-                if not alive_threads:
-                    print("\nAll sync threads have stopped")
-                    break
-                    
-                self.sync_threads = alive_threads
-                time.sleep(60)  # Check thread status every minute
+                for config in valid_configs:
+                    self.run_sync_for_config(config)
+                
+                # Log the overall sync cycle completion to database
+                if self.db_handler and overall_sync_id > 0:
+                    message = f"Completed sync cycle for {len(valid_configs)} configuration(s)"
+                    self.db_handler.log_sync_end(overall_sync_id, True, message)
+                
+                print(f"\nWaiting {interval} seconds before next sync cycle...")
+                time.sleep(interval)
                 
         except KeyboardInterrupt:
-            print("\nStopping all sync threads...")
+            print("\nSync process stopped by user")
+            
+            # Close database connection
+            if self.db_handler:
+                self.db_handler.close()
+                
             sys.exit(0)
+        except Exception as e:
+            print(f"\nError during continuous sync: {e}")
+            
+            # Log the error to database
+            if self.db_handler:
+                self.db_handler.log_sync_end(overall_sync_id, False, f"Error during continuous sync: {e}")
+                self.db_handler.close()
+                
+            sys.exit(1)
 
 def main():
     # Allow specifying custom config directory
-    config_dir = sys.argv[1] if len(sys.argv) > 1 else 'configs'
+    config_dir = 'configs'
+    if len(sys.argv) > 1:
+        config_dir = sys.argv[1]
+        
+    multi_sync = MultiSync(config_dir=config_dir)
+    multi_sync.load_configs()
+    multi_sync.print_status()
     
-    multi_sync = MultiSync(config_dir)
-    multi_sync.start_sync()
+    interval = 300  # Default interval in seconds
+    if len(sys.argv) > 2:
+        try:
+            interval = int(sys.argv[2])
+        except ValueError:
+            print(f"Invalid interval '{sys.argv[2]}', using default 300 seconds")
+    
+    # Start continuous sync
+    multi_sync.start_continuous_sync(interval=interval)
 
 if __name__ == "__main__":
     main()

@@ -18,6 +18,7 @@ A Python application that provides real-time synchronization between Feishu (Lar
 - Token management with automatic refresh
 - Support for recurring events
 - Support for meeting URLs and locations
+- PostgreSQL logging for sync activities and event actions
 
 ## Prerequisites
 
@@ -34,6 +35,8 @@ pip install lark-oapi
 pip install pytz
 pip install fastapi
 pip install uvicorn
+pip install psycopg2-binary
+pip install python-dotenv
 ```
 
 ### Required Credentials
@@ -60,6 +63,21 @@ pip install uvicorn
    - Client Secret
    - Tenant ID (for enterprise applications)
 4. Add a redirect URL in Authentication > Web: `https://login.microsoftonline.com/common/oauth2/nativeclient`
+
+#### PostgreSQL Database Setup (Optional)
+The application can log all sync activities to a PostgreSQL database for monitoring and auditing purposes.
+
+1. Create a PostgreSQL database
+2. Create a `.env` file in the project root with the following variables:
+```
+PGHOST='your_postgres_host'
+PGDATABASE='your_database_name'
+PGUSER='your_database_user'
+PGPASSWORD='your_database_password'
+SYNC_INTERVAL=300
+```
+
+If the `.env` file is not present, the application will use default hardcoded values or run without database logging.
 
 ## Installation
 
@@ -161,6 +179,9 @@ python multi_sync.py
 
 # Or specify custom config directory
 python multi_sync.py path/to/configs
+
+# Specify config directory and sync interval in seconds
+python multi_sync.py path/to/configs 600
 ```
 
 The multi-user sync will:
@@ -168,6 +189,7 @@ The multi-user sync will:
 - Report configuration status
 - Run independent sync processes for each valid configuration
 - Monitor and report sync status
+- Log all activities to PostgreSQL database (if configured)
 
 ### Configuration Options
 
@@ -187,6 +209,34 @@ if __name__ == "__main__":
     auth_handler = AuthHandler()
     sync_calendars(auth_handler)
 ```
+
+## Database Logging
+
+When PostgreSQL database is configured, the application logs the following information:
+
+### Sync Logs
+- Start and end times of each sync operation
+- Configuration name
+- Success/failure status
+- Summary message
+
+### Event Sync Logs
+- Details about each calendar pair sync
+- Counts of events synced, skipped, failed, and deleted
+- Calendar IDs and names
+
+### Event Action Logs
+- Detailed logs for each event action (create, delete)
+- Event title and timing information
+- Success/failure status
+- Error messages if applicable
+
+The database schema includes three main tables:
+- `sync_logs`: Overall sync operation records
+- `event_syncs`: Calendar pair sync records
+- `event_logs`: Individual event action records
+
+You can query these tables to generate reports on sync activities, troubleshoot issues, or monitor system performance.
 
 ## License
 

@@ -1,9 +1,18 @@
 import sys
+import os
 import time
 import requests
 from datetime import datetime, timezone, timedelta
 from auth_handler import AuthHandler
+from db_handler import DBHandler
 from typing import Optional, Tuple
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Global database handler instance
+db_handler = None
 
 def get_outlook_events(auth_handler: AuthHandler, calendar_id: str):
     """Get Outlook events with proper query handling."""
@@ -152,7 +161,7 @@ def filter_future_events(events):
             
     return future_events
 
-def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_events, outlook_calendar_id: str) -> Tuple[int, int, int]:
+def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_events, outlook_calendar_id: str, event_sync_id: int = -1) -> Tuple[int, int, int, int]:
     """Sync events (including deletions) from Feishu to specific Outlook calendar."""
     synced_count = 0
     skipped_count = 0
@@ -220,15 +229,64 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
                     print(f"\nProcessing deletion for future event: {summary} at {datetime.fromtimestamp(start_timestamp, tz=timezone.utc)}")
                     event = calendar.get_event(outlook_data['id'])
                     if event:
+                        start_time = datetime.fromtimestamp(start_timestamp, tz=timezone.utc)
+                        
+                        # Log the deletion attempt
+                        if db_handler and event_sync_id > 0:
+                            db_handler.log_event_action(
+                                event_sync_id=event_sync_id,
+                                event_title=summary,
+                                event_start_time=start_time,
+                                event_end_time=start_time + timedelta(hours=1),  # Approximation if end time unavailable
+                                action="delete",
+                                status="started"
+                            )
+                            
                         if event.delete():
                             print(f"Successfully deleted event: {summary}")
                             deleted_count += 1
+                            
+                            # Log the deletion success
+                            if db_handler and event_sync_id > 0:
+                                db_handler.log_event_action(
+                                    event_sync_id=event_sync_id,
+                                    event_title=summary,
+                                    event_start_time=start_time,
+                                    event_end_time=start_time + timedelta(hours=1),  # Approximation if end time unavailable
+                                    action="delete",
+                                    status="success"
+                                )
                         else:
                             print(f"Failed to delete event: {summary}")
                             failed_count += 1
+                            
+                            # Log the deletion failure
+                            if db_handler and event_sync_id > 0:
+                                db_handler.log_event_action(
+                                    event_sync_id=event_sync_id,
+                                    event_title=summary,
+                                    event_start_time=start_time,
+                                    event_end_time=start_time + timedelta(hours=1),  # Approximation if end time unavailable
+                                    action="delete",
+                                    status="failed",
+                                    error_message="Delete operation returned failure"
+                                )
                 except Exception as e:
                     print(f"Error deleting event: {e}")
                     failed_count += 1
+                    
+                    # Log the deletion error
+                    if db_handler and event_sync_id > 0:
+                        start_time = datetime.fromtimestamp(start_timestamp, tz=timezone.utc)
+                        db_handler.log_event_action(
+                            event_sync_id=event_sync_id,
+                            event_title=summary,
+                            event_start_time=start_time,
+                            event_end_time=start_time + timedelta(hours=1),  # Approximation
+                            action="delete",
+                            status="error",
+                            error_message=str(e)
+                        )
 
     # Process regular events (new and updates)
     for event in (feishu_events or []):
@@ -254,6 +312,7 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
 
             # Convert to integer timestamp
             start_timestamp = int(float(start_timestamp))
+            end_timestamp = int(float(end_timestamp))
             
             # Skip past events
             if start_timestamp < current_timestamp:
@@ -262,6 +321,7 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
 
             event_key = (summary, start_timestamp)
             event_start = datetime.fromtimestamp(start_timestamp, tz=timezone.utc)
+            event_end = datetime.fromtimestamp(end_timestamp, tz=timezone.utc)
             
             if event_key in existing_events:
                 print(f"\nSkipping existing event: {summary}")
@@ -271,6 +331,17 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
 
             print(f"\nNew event found: {summary}")
             print(f"Start: {event_start}")
+            
+            # Log the creation attempt
+            if db_handler and event_sync_id > 0:
+                db_handler.log_event_action(
+                    event_sync_id=event_sync_id,
+                    event_title=summary,
+                    event_start_time=event_start,
+                    event_end_time=event_end,
+                    action="create",
+                    status="started"
+                )
             
             new_event = calendar.new_event()
             
@@ -322,12 +393,47 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
                     print(f"Successfully created event: {summary}")
                     print(f"Successfully synced: {summary}")
                     synced_count += 1
+                    
+                    # Log the creation success
+                    if db_handler and event_sync_id > 0:
+                        db_handler.log_event_action(
+                            event_sync_id=event_sync_id,
+                            event_title=summary,
+                            event_start_time=event_start,
+                            event_end_time=event_end,
+                            action="create",
+                            status="success"
+                        )
                 else:
                     print(f"Failed to sync: {summary}")
                     failed_count += 1
+                    
+                    # Log the creation failure
+                    if db_handler and event_sync_id > 0:
+                        db_handler.log_event_action(
+                            event_sync_id=event_sync_id,
+                            event_title=summary,
+                            event_start_time=event_start,
+                            event_end_time=event_end,
+                            action="create",
+                            status="failed",
+                            error_message="Save operation returned failure"
+                        )
             except Exception as e:
                 print(f"Error saving event: {str(e)}")
                 failed_count += 1
+                
+                # Log the creation error
+                if db_handler and event_sync_id > 0:
+                    db_handler.log_event_action(
+                        event_sync_id=event_sync_id,
+                        event_title=summary,
+                        event_start_time=event_start,
+                        event_end_time=event_end,
+                        action="create",
+                        status="error",
+                        error_message=str(e)
+                    )
                     
         except Exception as e:
             print(f"Error processing event for sync: {e}")
@@ -340,6 +446,8 @@ def sync_calendar_events(auth_handler: AuthHandler, feishu_events, outlook_event
 
 def sync_calendars(auth_handler: AuthHandler) -> bool:
     """Main sync function that handles all calendar pairs."""
+    global db_handler
+    
     if not auth_handler.verify_feishu_tokens():
         print("Feishu token verification failed")
         return False
@@ -353,16 +461,38 @@ def sync_calendars(auth_handler: AuthHandler) -> bool:
         total_skipped = 0
         total_failed = 0
         total_deleted = 0
+        
+        # Start sync logging in database
+        sync_id = -1
+        if db_handler:
+            sync_id = db_handler.log_sync_start(auth_handler.yaml_file)
 
         for pair in auth_handler.calendar_pairs:
             feishu_id = pair['feishu']['id']
             feishu_name = pair['feishu']['name']
             outlook_id = pair['outlook']['id']
             outlook_name = pair['outlook']['name']
+            calendar_pair_name = f"{feishu_name} -> {outlook_name}"
 
             print(f"\nProcessing calendar pair:")
             print(f"Feishu: {feishu_name}")
             print(f"Outlook: {outlook_name}")
+            
+            # Initialize calendar sync entry in database
+            event_sync_id = -1
+            if db_handler and sync_id > 0:
+                event_sync_id = db_handler.log_calendar_sync(
+                    sync_id=sync_id,
+                    calendar_pair=calendar_pair_name,
+                    feishu_calendar_id=feishu_id,
+                    feishu_calendar_name=feishu_name,
+                    outlook_calendar_id=outlook_id,
+                    outlook_calendar_name=outlook_name,
+                    events_synced=0,
+                    events_skipped=0,
+                    events_failed=0,
+                    events_deleted=0
+                )
             
             # Get Outlook events for this specific calendar
             outlook_events = get_outlook_events(auth_handler, outlook_id)
@@ -387,28 +517,56 @@ def sync_calendars(auth_handler: AuthHandler) -> bool:
                 auth_handler,
                 future_events,
                 outlook_events,
-                outlook_id
+                outlook_id,
+                event_sync_id
             )
             
             total_synced += synced
             total_skipped += skipped
             total_failed += failed
             total_deleted += deleted
+            
+            # Update the calendar sync entry with final counts
+            if db_handler and event_sync_id > 0:
+                db_handler.log_calendar_sync(
+                    sync_id=sync_id,
+                    calendar_pair=calendar_pair_name,
+                    feishu_calendar_id=feishu_id,
+                    feishu_calendar_name=feishu_name,
+                    outlook_calendar_id=outlook_id,
+                    outlook_calendar_name=outlook_name,
+                    events_synced=synced,
+                    events_skipped=skipped,
+                    events_failed=failed,
+                    events_deleted=deleted
+                )
 
         print(f"\nSync Summary:")
         print(f"- Events synced: {total_synced}")
         print(f"- Events skipped: {total_skipped}")
         print(f"- Events failed: {total_failed}")
         print(f"- Events deleted: {total_deleted}")
+        
+        # Update the sync log with final status
+        if db_handler and sync_id > 0:
+            message = f"Sync completed: {total_synced} synced, {total_skipped} skipped, {total_failed} failed, {total_deleted} deleted"
+            db_handler.log_sync_end(sync_id, True, message)
 
         return True
     
     except Exception as e:
         print(f"Error during sync: {e}")
+        
+        # Log the error in database
+        if db_handler and sync_id > 0:
+            db_handler.log_sync_end(sync_id, False, f"Error during sync: {e}")
+            
         return False
 
 def run_sync(config_path: str = 'tokens.yaml') -> bool:
     """Run sync process with specified config file."""
+    global db_handler
+    
     try:
         auth_handler = AuthHandler(yaml_file=config_path)
         
@@ -432,7 +590,21 @@ def run_sync(config_path: str = 'tokens.yaml') -> bool:
 
 def run_continuous_sync(config_path: str = 'tokens.yaml', interval: int = 300) -> None:
     """Run continuous sync process with specified interval."""
+    global db_handler
+    
     try:
+        # Initialize database connection if not already done
+        if db_handler is None:
+            db_handler = DBHandler(
+                host=os.environ.get('PGHOST', 'ep-red-brook-aawc47cf-pooler.westus3.azure.neon.tech'),
+                database=os.environ.get('PGDATABASE', 'CalendarSync'),
+                user=os.environ.get('PGUSER', 'CalendarSync_owner'),
+                password=os.environ.get('PGPASSWORD', 'npg_Had49rjAFUVg')
+            )
+            if not db_handler.connect():
+                print("Failed to connect to database, proceeding without database logging")
+                db_handler = None
+        
         print(f"Starting continuous sync for {config_path}")
         while True:
             success = run_sync(config_path)
@@ -446,17 +618,44 @@ def run_continuous_sync(config_path: str = 'tokens.yaml', interval: int = 300) -
             
     except KeyboardInterrupt:
         print("\nSync process stopped by user")
+        
+        # Close database connection
+        if db_handler:
+            db_handler.close()
+            
         sys.exit(0)
     except Exception as e:
         print(f"\nError during continuous sync for {config_path}: {e}")
+        
+        # Close database connection
+        if db_handler:
+            db_handler.close()
+            
         sys.exit(1)
 
 if __name__ == "__main__":
+    # Initialize database connection
+    db_handler = DBHandler(
+        host=os.environ.get('PGHOST', 'ep-red-brook-aawc47cf-pooler.westus3.azure.neon.tech'),
+        database=os.environ.get('PGDATABASE', 'CalendarSync'),
+        user=os.environ.get('PGUSER', 'CalendarSync_owner'),
+        password=os.environ.get('PGPASSWORD', 'npg_Had49rjAFUVg')
+    )
+    
+    if not db_handler.connect():
+        print("Failed to connect to database, proceeding without database logging")
+        db_handler = None
+    
     auth_handler = AuthHandler()
     
     # Verify initial setup
     if not auth_handler.is_fully_configured():
         print("Please run auth_handler.py first to setup authentication")
+        
+        # Close database connection
+        if db_handler:
+            db_handler.close()
+            
         sys.exit(1)
 
     print("Starting sync process...")
@@ -467,7 +666,17 @@ if __name__ == "__main__":
             
     except KeyboardInterrupt:
         print("\nSync process stopped by user")
+        
+        # Close database connection
+        if db_handler:
+            db_handler.close()
+            
         sys.exit(0)
     except Exception as e:
         print(f"\nError during sync: {e}")
+        
+        # Close database connection
+        if db_handler:
+            db_handler.close()
+            
         sys.exit(1)

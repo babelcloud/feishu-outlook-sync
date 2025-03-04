@@ -4,3 +4,5 @@ O365
 uvicorn
 fastapi
 datetime
+psycopg2-binary
+python-dotenv
